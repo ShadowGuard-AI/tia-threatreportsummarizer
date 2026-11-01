@@ -2,8 +2,6 @@ import argparse
 import logging
 import os
 import sys
-import requests
-from bs4 import BeautifulSoup
 import re
 import json  # For structured data output if needed
 
@@ -44,12 +42,10 @@ def download_report(url):
     Returns:
         str: The content of the report as text, or None if an error occurred.
     """
+    import requests
+    from bs4 import BeautifulSoup
     try:
-        # No timeout is set, and stream=True buys nothing here: the
-        # code reads response.text below, which pulls the whole body
-        # into memory either way. A slow server hangs the run and a
-        # huge report lands entirely in RAM despite the comment.
-        response = requests.get(url, stream=True)  # Added stream=True for large files
+        response = requests.get(url, stream=True, timeout=10)
         response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
 
         # Check content type to handle HTML
@@ -59,8 +55,8 @@ def download_report(url):
             text = soup.get_text(separator="\n", strip=True)  # Extract text from HTML
             return text
         elif "application/pdf" in content_type:
-             logging.warning("PDF files are not yet supported. Please use a text-based report.")
-             return None  #Or implement PDF parsing if possible
+             logging.error("PDF files are not supported. Please use a text-based report.")
+             return None
 
         return response.text
 
@@ -79,6 +75,9 @@ def read_report_from_file(filepath):
     Returns:
         str: The content of the report as text, or None if an error occurred.
     """
+    if filepath.lower().endswith(".pdf"):
+        logging.error("PDF files are not supported. Please use a text-based report.")
+        return None
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             return f.read()
@@ -103,11 +102,13 @@ def extract_iocs(report_text):
     """
     # Simple regex for IPs, domains, and hashes (improve as needed)
     ip_regex = r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b"
-    domain_regex = r"\b(?:[A-Za-z0-9-]+(?:\.[A-Za-z]{2,}))+\b"  # Basic domain regex
+    domain_regex = r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\b"  # Full multi-label domain, final label included
     hash_regex = r"\b[a-f0-9]{32,128}\b"  # Basic hash regex (MD5, SHA1, SHA256, SHA512)
 
     ips = re.findall(ip_regex, report_text)
     domains = re.findall(domain_regex, report_text)
+    file_extensions = {"exe", "dll", "bat", "sh", "txt", "pdf", "zip", "doc", "docx", "xls", "xlsx", "png", "jpg", "jpeg", "gif", "sys", "com1"}
+    domains = [d for d in domains if d.rsplit(".", 1)[-1].lower() not in file_extensions]
     hashes = re.findall(hash_regex, report_text)
 
     # Every list goes through a set before it reaches the report, so
@@ -137,6 +138,44 @@ def extract_mitre_techniques(report_text):
     return list(set(techniques))
 
 
+
+STOPWORDS = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "by", "is", "are", "was", "were", "be", "been", "it", "its", "this", "that", "as", "at", "from", "an"}
+
+def extract_keywords(report_text, limit=10):
+    words = re.findall(r"[A-Za-z]{3,}", report_text.lower())
+    counts = {}
+    for w in words:
+        if w not in STOPWORDS:
+            counts[w] = counts.get(w, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [w for w, _ in ranked[:limit]]
+
+def extract_summary_sentences(report_text, limit=3):
+    sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", report_text.replace("\n", " ")) if x.strip()]
+    if not sentences:
+        return []
+    freq = {}
+    for w in re.findall(r"[A-Za-z]{3,}", report_text.lower()):
+        if w not in STOPWORDS:
+            freq[w] = freq.get(w, 0) + 1
+    def score(sentence):
+        words = [w for w in re.findall(r"[A-Za-z]{3,}", sentence.lower()) if w not in STOPWORDS]
+        return sum(freq.get(w, 0) for w in words) / max(len(words), 1)
+    ranked = sorted(sentences, key=score, reverse=True)
+    chosen = ranked[:limit]
+    # Keep the report order for readability.
+    return [x for x in sentences if x in chosen]
+
+def extract_affected_systems(report_text):
+    match = re.search(r"affected systems?\s*:\s*([^\n.]+)", report_text, flags=re.IGNORECASE)
+    if match:
+        return [match.group(1).strip()]
+    found = []
+    for sentence in re.split(r"(?<=[.!?])\s+", report_text.replace("\n", " ")):
+        if "affected system" in sentence.lower():
+            found.append(sentence.strip())
+    return found
+
 def summarize_report(report_text):
     """
     Summarizes the report text by extracting key IOCs and MITRE ATT&CK techniques.
@@ -152,6 +191,9 @@ def summarize_report(report_text):
     mitre_techniques = extract_mitre_techniques(report_text)
 
     summary = {
+        "summary": extract_summary_sentences(report_text),
+        "keywords": extract_keywords(report_text),
+        "affected_systems": extract_affected_systems(report_text),
         "iocs": iocs,
         "mitre_techniques": mitre_techniques,
     }
@@ -177,6 +219,13 @@ def save_summary(summary, output_path, output_format):
                 f.write(f"  IP Addresses: {', '.join(summary['iocs']['ips']) or 'None'}\n")
                 f.write(f"  Domains: {', '.join(summary['iocs']['domains']) or 'None'}\n")
                 f.write(f"  Hashes: {', '.join(summary['iocs']['hashes']) or 'None'}\n")
+                f.write("\nSummary:\n")
+                for sentence in summary.get("summary", []):
+                    f.write(f"  {sentence}\n")
+                f.write("\nKeywords:\n")
+                f.write(f"  {', '.join(summary.get('keywords', [])) or 'None'}\n")
+                f.write("\nAffected Systems:\n")
+                f.write(f"  {', '.join(summary.get('affected_systems', [])) or 'None'}\n")
                 f.write("\nMITRE ATT&CK Techniques:\n")
                 f.write(f"  {', '.join(summary['mitre_techniques']) or 'None'}\n")
         elif output_format == "json":
@@ -184,8 +233,10 @@ def save_summary(summary, output_path, output_format):
                 json.dump(summary, f, indent=4)
 
         logging.info(f"Summary saved to: {output_path} in {output_format} format.")
+        return True
     except IOError as e:
         logging.error(f"Error saving summary to {output_path}: {e}")
+        return False
 
 
 def print_summary(summary, output_format):
@@ -203,6 +254,13 @@ def print_summary(summary, output_format):
         print(f"  IP Addresses: {', '.join(summary['iocs']['ips']) or 'None'}")
         print(f"  Domains: {', '.join(summary['iocs']['domains']) or 'None'}")
         print(f"  Hashes: {', '.join(summary['iocs']['hashes']) or 'None'}")
+        print("\nSummary:")
+        for sentence in summary.get("summary", []):
+            print(f"  {sentence}")
+        print("\nKeywords:")
+        print(f"  {', '.join(summary.get('keywords', [])) or 'None'}")
+        print("\nAffected Systems:")
+        print(f"  {', '.join(summary.get('affected_systems', [])) or 'None'}")
         print("\nMITRE ATT&CK Techniques:")
         print(f"  {', '.join(summary['mitre_techniques']) or 'None'}")
     elif output_format == "json":
@@ -252,7 +310,9 @@ def main():
     summary = summarize_report(report_text)
 
     if output_path:
-        save_summary(summary, output_path, output_format)
+        if not save_summary(summary, output_path, output_format):
+            print_summary(summary, output_format)
+            sys.exit(1)
     else:
         print_summary(summary, output_format)
 
