@@ -45,6 +45,10 @@ def download_report(url):
         str: The content of the report as text, or None if an error occurred.
     """
     try:
+        # No timeout is set, and stream=True buys nothing here: the
+        # code reads response.text below, which pulls the whole body
+        # into memory either way. A slow server hangs the run and a
+        # huge report lands entirely in RAM despite the comment.
         response = requests.get(url, stream=True)  # Added stream=True for large files
         response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
 
@@ -106,6 +110,10 @@ def extract_iocs(report_text):
     domains = re.findall(domain_regex, report_text)
     hashes = re.findall(hash_regex, report_text)
 
+    # Every list goes through a set before it reaches the report, so
+    # the order in the output is set order, not the order the report
+    # mentioned things in, and it changes between runs. Anyone diffing
+    # two summaries of the same input gets noise, not changes.
     return {"ips": list(set(ips)), "domains": list(set(domains)), "hashes": list(set(hashes))}
 
 
@@ -121,6 +129,9 @@ def extract_mitre_techniques(report_text):
         list: A list of potential MITRE ATT&CK techniques.
     """
     # Basic regex for MITRE ATT&CK technique IDs (e.g., T1059.001)
+    # There are no word boundaries on this pattern, so a T followed by
+    # four digits inside a longer token counts: part numbers, build
+    # strings, and truncated hashes all mint technique IDs here.
     mitre_regex = r"T[0-9]{4}(?:\.[0-9]{3})?"
     techniques = re.findall(mitre_regex, report_text)
     return list(set(techniques))
