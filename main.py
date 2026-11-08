@@ -103,7 +103,7 @@ def extract_iocs(report_text):
     # Simple regex for IPs, domains, and hashes (improve as needed)
     ip_regex = r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b"
     domain_regex = r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\b"  # Full multi-label domain, final label included
-    hash_regex = r"\b[a-f0-9]{32,128}\b"  # Basic hash regex (MD5, SHA1, SHA256, SHA512)
+    hash_regex = r"\b(?:[0-9a-fA-F]{128}|[0-9a-fA-F]{64}|[0-9a-fA-F]{40}|[0-9a-fA-F]{32})\b"  # Exact hash lengths (MD5, SHA1, SHA256, SHA512), either case
 
     ips = re.findall(ip_regex, report_text)
     domains = re.findall(domain_regex, report_text)
@@ -111,11 +111,11 @@ def extract_iocs(report_text):
     domains = [d for d in domains if d.rsplit(".", 1)[-1].lower() not in file_extensions]
     hashes = re.findall(hash_regex, report_text)
 
-    # Every list goes through a set before it reaches the report, so
-    # the order in the output is set order, not the order the report
-    # mentioned things in, and it changes between runs. Anyone diffing
-    # two summaries of the same input gets noise, not changes.
-    return {"ips": list(set(ips)), "domains": list(set(domains)), "hashes": list(set(hashes))}
+    # Deduplicate in first-mention order so two summaries of the same
+    # input are byte-identical and diffs show real changes only. The
+    # previous set-based dedup emitted set order, which changes
+    # between runs.
+    return {"ips": list(dict.fromkeys(ips)), "domains": list(dict.fromkeys(domains)), "hashes": list(dict.fromkeys(hashes))}
 
 
 def extract_mitre_techniques(report_text):
@@ -130,12 +130,12 @@ def extract_mitre_techniques(report_text):
         list: A list of potential MITRE ATT&CK techniques.
     """
     # Basic regex for MITRE ATT&CK technique IDs (e.g., T1059.001)
-    # There are no word boundaries on this pattern, so a T followed by
-    # four digits inside a longer token counts: part numbers, build
-    # strings, and truncated hashes all mint technique IDs here.
-    mitre_regex = r"T[0-9]{4}(?:\.[0-9]{3})?"
+    # Word boundaries keep a T followed by four digits inside a longer
+    # token from counting: without them, part numbers and build
+    # strings such as PART1059 minted a spurious T1059.
+    mitre_regex = r"\bT[0-9]{4}(?:\.[0-9]{3})?\b"
     techniques = re.findall(mitre_regex, report_text)
-    return list(set(techniques))
+    return list(dict.fromkeys(techniques))
 
 
 
